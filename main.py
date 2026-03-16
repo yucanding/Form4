@@ -131,8 +131,8 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         output = (
             f"🕒 发布时间: {pub_time_fmt}\n"
             f"📅 购买时间: {buy_time}\n"
-            f"🏢 公司: <b>${symbol}</b> ({issuer_name})\n"
-            f"💰 买入金额: <b>${total_value:,.2f}</b> ({pos_change_str})\n"
+            f"🏢 公司: ${symbol} ({issuer_name})\n"
+            f"💰 买入金额: ${total_value:,.2f} ({pos_change_str})\n"
             f"📊 买入股数: {total_shares:,.0f}股\n"
             f"🌊 占市值比: {mkt_impact_str}\n"
             f"👤 人名: {buyer_name} ({rel})\n"
@@ -184,10 +184,12 @@ def run():
         
         # --- 合并推送逻辑 ---
         if message_queue:
-            # 组装最终的大消息
-            final_text = "<b>🔔 内部人士买入警报 (>$1M)</b>\n\n"
-            final_text += "\n\n" + ("-" * 20) + "\n\n".join(message_queue)
-            final_text += "\n\n#Form4 #InsiderTrading"
+            # 1. 组装标题
+            final_text = "<b>🔔内部人士买入警报</b>\n"
+            # 2. 将横线作为“连接符”放在信息之间，而不是放在开头
+            final_text += ("\n\n" + "-" * 20 + "\n\n").join(message_queue)
+            # 3. 加上结尾标签
+            final_text += "\n\n#InsiderTrading #Form4"
             
             send_tg_message(final_text)
 
