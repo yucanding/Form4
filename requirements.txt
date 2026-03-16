@@ -1,0 +1,4 @@
+feedparser
+curl_cffi
+beautifulsoup4
+yfinance
