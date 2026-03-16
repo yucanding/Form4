@@ -1,0 +1,38 @@
+name: SEC Form 4 Monitor
+
+on:
+  schedule:
+    # 每 10 分钟运行一次。对应的 UTC 时间涵盖了美东周一 6am 到周五 9pm
+    - cron: '*/10 10-23 * * 1-5' # 周一到周五 10:00-23:50 UTC
+    - cron: '*/10 0-2 * * 2-6'   # 周二到周六 00:00-02:50 UTC (对应美东周一到周五晚上)
+  workflow_dispatch: # 允许手动触发调试
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Monitor
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
+
+      - name: Commit and Push State
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add processed_ids.txt
+          git commit -m "Update processed filings state" || echo "No changes to commit"
+          git push
