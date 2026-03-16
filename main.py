@@ -17,7 +17,7 @@ SEC_HEADERS = {
 
 FEED_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom"
 BUY_THRESHOLD = 1000000  # 100万美元门槛
-PRICE_FLOOR = 0.5        # 股价低于0.5美元过滤
+PRICE_FLOOR = 20        # 股价低于20美元过滤
 STATE_FILE = "processed_ids.txt"
 
 TG_TOKEN = os.getenv("TG_TOKEN")
@@ -112,7 +112,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         shares_before = final_owned - total_shares
         if shares_before > 0:
             pos_change_pct = (total_shares / shares_before) * 100
-            if pos_change_pct < 5: return None
+            if pos_change_pct < 20: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
         else:
             pos_change_str = "首次建仓"
@@ -185,7 +185,7 @@ def run():
         # --- 合并推送逻辑 ---
         if message_queue:
             # 1. 组装标题
-            final_text = "<b>🔔内部人士买入警报</b>\n"
+            final_text = "<b>🔔内部人士买入警报</b>\n\n"
             # 2. 将横线作为“连接符”放在信息之间，而不是放在开头
             final_text += ("\n\n" + "-" * 20 + "\n\n").join(message_queue)
             # 3. 加上结尾标签
