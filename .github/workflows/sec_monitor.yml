@@ -1,17 +1,20 @@
-name: SEC Form 4 Monitor
+name: SEC Form 4 Multi-Channel Monitor
 
 on:
   schedule:
-    # 每 10 分钟运行一次。对应的 UTC 时间涵盖了美东周一 6am 到周五 9pm
-    - cron: '*/10 10-23 * * 1-5' # 周一到周五 10:00-23:50 UTC
-    - cron: '*/10 0-2 * * 2-6'   # 周二到周六 00:00-02:50 UTC (对应美东周一到周五晚上)
-  workflow_dispatch: # 允许手动触发调试
+    # 这里的 Cron 涵盖了美东周一早6点到周五晚9点 (每10分钟运行一次)
+    # 注意：GitHub Cron 使用的是 UTC 时间
+    - cron: '*/10 10-23 * * 1-5' # 周一至周五 10:00-23:50 UTC (美东 6am-7pm)
+    - cron: '*/10 0-1 * * 2-6'   # 周二至周六 00:00-01:50 UTC (美东 8pm-9pm)
+  workflow_dispatch: # 允许你手动点击运行
 
 jobs:
-  build:
+  monitor:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须允许写入权限，才能更新已读列表文件
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -21,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install feedparser curl_cffi beautifulsoup4 yfinance
 
       - name: Run Monitor
         env:
@@ -29,10 +32,10 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python main.py
 
-      - name: Commit and Push State
+      - name: Save State
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "sec-bot"
+          git config --global user.email "bot@sec.gov"
           git add processed_ids.txt
-          git commit -m "Update processed filings state" || echo "No changes to commit"
+          git commit -m "update state" || echo "no changes"
           git push
