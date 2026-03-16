@@ -20,26 +20,33 @@ BUY_THRESHOLD = 1000000  # 100万美元门槛
 PRICE_FLOOR = 0.5        # 股价低于0.5美元过滤
 STATE_FILE = "processed_ids.txt"
 
-# 从环境变量获取 Telegram 配置
+# 从环境变量获取配置
 TG_TOKEN = os.getenv("TG_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+# 支持多个 ID，用逗号隔开，例如: "-1001234567,88888888"
+TG_CHAT_IDS = os.getenv("TG_CHAT_ID", "").split(",")
 
 def send_tg_message(text):
-    """ 推送到 Telegram """
-    if not TG_TOKEN or not TG_CHAT_ID:
+    """ 同时推送到多个 Telegram 目标 (Bot & Channel) """
+    if not TG_TOKEN or not TG_CHAT_IDS:
+        print("未配置 Telegram Token 或 Chat ID，仅在本地打印：")
         print(text)
         return
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"发送失败: {e}")
+
+    for chat_id in TG_CHAT_IDS:
+        chat_id = chat_id.strip()
+        if not chat_id: continue
+        
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        }
+        try:
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print(f"发送到 {chat_id} 失败: {e}")
 
 def get_market_data(ticker):
     try:
@@ -118,8 +125,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         shares_before = final_owned - total_shares
         if shares_before > 0:
             pos_change_pct = (total_shares / shares_before) * 100
-            if pos_change_pct < 5:
-                return None
+            if pos_change_pct < 5: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
         else:
             pos_change_str = "首次建仓"
@@ -137,7 +143,6 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             pub_time_fmt = dt.strftime("%Y-%m-%d %H:%M:%S") + " ET"
         except: pub_time_fmt = pub_time_raw
 
-        # 修改为 HTML 格式
         output = (
             f"🕒 发布时间: {pub_time_fmt}\n"
             f"📅 购买时间: {buy_time}\n"
@@ -148,13 +153,13 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             f"🌊 占市值比: {mkt_impact_str}\n"
             f"📊 买入股数: {total_shares:,.0f}股\n"
             f"🏛️ 市值: {format_large_number(market_cap)}\n"
-            f"🔗 <a href='{view_url}'>点击查看公告</a>\n"
+            f"🔗 <a href='{view_url}'>点击查看公告</a>\n\n"
+            f"#InsiderTrading #Form4"
         )
         return output
     except: return None
 
 def run():
-    # 读取已处理的 ID
     processed_ids = set()
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -165,32 +170,31 @@ def run():
     try:
         resp = requests.get(FEED_URL, headers=SEC_HEADERS, impersonate="chrome120", timeout=30)
         feed = feedparser.parse(resp.content)
-        header_printed = False 
+        header_sent = False 
         new_ids = []
 
         for entry in feed.entries:
             if entry.category != '4': continue
             acc_no = entry.id.split('=')[-1]
-            
-            # 去重判断
             if acc_no in processed_ids: continue
 
             real_xml_url = get_real_xml_url(entry.link)
             if real_xml_url:
                 msg = parse_and_aggregate_buys(real_xml_url, entry.updated)
                 if msg:
-                    if not header_printed:
-                        # 仅在有符合条件的信号时，推送到 TG 的消息头部
-                        send_tg_message("<b>🔔 内部人士买入警报</b>")
-                        header_printed = True
+                    if not header_sent:
+                        send_tg_message("<b>🔔 内部人士买入警报 (>$1M)</b>")
+                        header_sent = True
                     
                     send_tg_message(msg)
                     new_ids.append(acc_no)
+                    # 避免瞬时推送过快导致 TG 限制
+                    time.sleep(1)
         
-        # 更新去重文件（仅保留最新的 500 个 ID 防止文件无限增大）
+        # 更新状态，保留最新的 1000 个 ID
         updated_ids = list(new_ids) + list(processed_ids)
         with open(STATE_FILE, "w") as f:
-            f.write("\n".join(updated_ids[:500]))
+            f.write("\n".join(updated_ids[:1000]))
 
     except Exception as e:
         print(f"\n🚨 运行异常: {e}")
