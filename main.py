@@ -115,7 +115,8 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             if pos_change_pct < 20: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
         else:
-            pos_change_str = "首次建仓"
+            # pos_change_str = "首次建仓"
+            return None
 
         mkt_impact_str = "N/A"
         if market_cap:
