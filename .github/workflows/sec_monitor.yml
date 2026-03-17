@@ -2,11 +2,17 @@ name: SEC Form 4 Multi-Channel Monitor
 
 on:
   schedule:
-    # 这里的 Cron 涵盖了美东周一早6点到周五晚9点 (每10分钟运行一次)
-    # 注意：GitHub Cron 使用的是 UTC 时间
-    - cron: '*/10 10-23 * * 1-5' # 周一至周五 10:00-23:50 UTC (美东 6am-7pm)
-    - cron: '*/10 0-1 * * 2-6'   # 周二至周六 00:00-01:50 UTC (美东 8pm-9pm)
-  workflow_dispatch: # 允许你手动点击运行
+    # 1. 周一：从美东早 4 点开始 (UTC 08:00) 直到深夜
+    - cron: '*/15 8-23 * * 1'
+    
+    # 2. 周二、周三、周四、周五：全天 24 小时不停歇运行
+    - cron: '*/15 * * * 2-5'
+    
+    # 3. 周六：运行到美东周五晚 9 点 (UTC 周六 01:00) 结束
+    # 00:00, 00:15, 00:30, 00:45 UTC 对应美东周五晚 8:00-8:45 PM
+    - cron: '*/15 0 * * 6'
+
+  workflow_dispatch:
 
 jobs:
   monitor:
