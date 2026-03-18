@@ -73,11 +73,14 @@ def get_real_xml_url(index_url):
 
 def parse_and_aggregate_buys(xml_url, pub_time_raw):
     try:
+        # 礼貌性随机延迟，避免被 SEC 封锁
         time.sleep(random.uniform(0.1, 0.2))
         resp = requests.get(xml_url, headers=SEC_HEADERS, impersonate="chrome120", timeout=15)
         if resp.status_code != 200: return None
         
         root = ET.fromstring(resp.content)
+        
+        # --- 基础信息解析 ---
         symbol = root.find(".//issuerTradingSymbol").text
         issuer_name = root.find(".//issuerName").text
         buyer_name = root.find(".//rptOwnerName").text
@@ -85,14 +88,19 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         buy_time_node = root.find(".//periodOfReport")
         buy_time = buy_time_node.text if buy_time_node is not None else "N/A"
         
+        # 身份解析
         off_node = root.find(".//officerTitle")
-        is_dir = root.find(".//isDirector").text == '1'
+        is_dir_node = root.find(".//isDirector")
+        is_dir = is_dir_node.text == '1' if is_dir_node is not None else False
         rel = off_node.text if off_node is not None else ("Director" if is_dir else "10% Owner")
 
+        # --- 交易数据聚合 ---
         total_shares, total_value, final_owned = 0, 0, 0
 
         for trans in root.findall(".//nonDerivativeTransaction"):
-            if trans.find(".//transactionCode").text == 'P':
+            # 核心过滤：只统计 Code P (Open Market Purchase)
+            t_code = trans.find(".//transactionCode")
+            if t_code is not None and t_code.text == '1' or t_code.text == 'P':
                 s_node = trans.find(".//transactionShares/value")
                 p_node = trans.find(".//transactionPricePerShare/value")
                 o_node = trans.find(".//sharesOwnedFollowingTransaction/value")
@@ -102,47 +110,67 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
                 
                 total_shares += shares
                 total_value += (shares * price)
-                final_owned = float(o_node.text) if o_node is not None and o_node.text else final_owned
+                # 记录交易后的最终持股数（以最后一笔交易为准）
+                if o_node is not None and o_node.text:
+                    final_owned = float(o_node.text)
 
+        # --- 新增：计算平均买入价 ---
+        avg_buy_price = total_value / total_shares if total_shares > 0 else 0
+
+        # --- 过滤逻辑 1: 买入金额门槛 ---
         if total_value < BUY_THRESHOLD: return None
 
+        # --- 获取市场数据 ---
         curr_price, market_cap = get_market_data(symbol)
+        
+        # --- 过滤逻辑 2: 股价地板 ---
         if curr_price is not None and curr_price < PRICE_FLOOR: return None 
 
+        # --- 仓位变动计算 ---
         shares_before = final_owned - total_shares
         if shares_before > 0:
             pos_change_pct = (total_shares / shares_before) * 100
+            # --- 过滤逻辑 3: 增持比例必须 >= 20% ---
             if pos_change_pct < 20: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
         else:
-            # pos_change_str = "首次建仓"
+            # 根据原逻辑，若为首次建仓或数据异常，返回 None
             return None
 
+        # --- 市值影响计算 ---
         mkt_impact_str = "N/A"
         if market_cap:
             mkt_impact = (total_value / market_cap) * 100
             mkt_impact_str = f"{mkt_impact:.4f}%"
 
+        # --- 链接生成 ---
+        # 构造可直接阅读的 HTML 版本 URL
         view_url = f"{xml_url.rsplit('/', 1)[0]}/xslF345X05/{xml_url.rsplit('/', 1)[1]}"
 
+        # --- 时间格式化 ---
         try:
             pub_time_fmt = datetime.fromisoformat(pub_time_raw.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M:%S") + " ET"
-        except: pub_time_fmt = pub_time_raw
+        except: 
+            pub_time_fmt = pub_time_raw
 
+        # --- 最终输出文本组装 ---
         output = (
             f"🕒 发布时间: {pub_time_fmt}\n"
             f"📅 购买时间: {buy_time}\n"
             f"🏢 公司: ${symbol} ({issuer_name})\n"
-            f"💰 买入金额: ${total_value:,.2f} ({pos_change_str})\n"
+            f"💰 买入总额: ${total_value:,.2f} ({pos_change_str})\n"
             f"📊 买入股数: {total_shares:,.0f}股\n"
+            f"💵 平均买入价: ${avg_buy_price:.2f}\n"
             f"🌊 占市值比: {mkt_impact_str}\n"
             f"👤 人名: {buyer_name} ({rel})\n"
-            f"💵 股价: ${curr_price if curr_price else 'N/A'}\n"
+            f"💵 当前股价: ${curr_price if curr_price else 'N/A'}\n"
             f"🏛️ 市值: {format_large_number(market_cap)}\n"
             f"🔗 <a href='{view_url}'>点击查看公告</a>"
         )
         return output
-    except: return None
+    except Exception as e:
+        # 调试用：print(f"解析 XML 出错: {e}")
+        return None
 
 def run():
     # 读取历史 ID
