@@ -131,8 +131,10 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         if shares_before > 0:
             pos_change_pct = (total_shares / shares_before) * 100
             # --- 过滤逻辑 3: 增持比例必须 >= 20% ---
-            if pos_change_pct < 20: return None
+            if pos_change_pct < 20 and total_value < 100000000: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
+        elif shares_before == 0 and total_value > 50000000:
+            pos_change_str = "新建仓位"
         else:
             # 根据原逻辑，若为首次建仓或数据异常，返回 None
             return None
