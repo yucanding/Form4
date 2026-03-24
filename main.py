@@ -125,6 +125,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         
         # --- 过滤逻辑 2: 股价地板 ---
         if curr_price is not None and curr_price < PRICE_FLOOR: return None 
+        if curr_price is None: return None
 
         # --- 仓位变动计算 ---
         shares_before = final_owned - total_shares
