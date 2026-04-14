@@ -87,6 +87,23 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         
         buy_time_node = root.find(".//periodOfReport")
         buy_time = buy_time_node.text if buy_time_node is not None else "N/A"
+
+        try:
+            if buy_time != "N/A":
+                # 转换发布时间为 datetime (UTC)
+                pub_dt = datetime.fromisoformat(pub_time_raw.replace('Z', '+00:00'))
+                # 转换购买时间为 datetime
+                buy_dt = datetime.strptime(buy_time, "%Y-%m-%d").replace(tzinfo=pub_dt.tzinfo)
+                
+                # 计算差值
+                diff = pub_dt - buy_dt
+                if diff.days > 5:
+                    # print(f"⏭️ 信号太旧 (滞后 {diff.days} 天): {symbol}")
+                    return None
+        except Exception as e:
+            print(f"⚠️ 时间解析失败: {e}")
+            # 如果解析失败，通常选择放行或拦截，这里建议放行
+            pass
         
         # 身份解析
         off_node = root.find(".//officerTitle")
@@ -100,7 +117,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         for trans in root.findall(".//nonDerivativeTransaction"):
             # 核心过滤：只统计 Code P (Open Market Purchase)
             t_code = trans.find(".//transactionCode")
-            if t_code is not None and t_code.text == '1' or t_code.text == 'P':
+            if t_code is not None and t_code.text in ['1', 'P']:
                 s_node = trans.find(".//transactionShares/value")
                 p_node = trans.find(".//transactionPricePerShare/value")
                 o_node = trans.find(".//sharesOwnedFollowingTransaction/value")
