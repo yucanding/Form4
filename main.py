@@ -173,6 +173,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         except: 
             pub_time_fmt = pub_time_raw
 
+        trade_signature = f"{symbol}_{buy_time}_{total_shares}_{total_value:.2f}"
         # --- 最终输出文本组装 ---
         output = (
             f"🕒 发布时间: {pub_time_fmt}\n"
@@ -187,7 +188,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             f"🏛️ 市值: {format_large_number(market_cap)}\n"
             f"🔗 <a href='{view_url}'>点击查看公告</a>"
         )
-        return output
+        return output, trade_signature
     except Exception as e:
         # 调试用：print(f"解析 XML 出错: {e}")
         return None
@@ -200,32 +201,41 @@ def run():
             processed_ids = set(f.read().splitlines())
 
     print(f"📡 正在开启深度分析...")
+
+    seen_trades_this_run = set()
     
     try:
         resp = requests.get(FEED_URL, headers=SEC_HEADERS, impersonate="chrome120", timeout=30)
         feed = feedparser.parse(resp.content)
         
-        # 本次运行抓到的新消息队列和新 ID
         message_queue = []
         new_ids = []
-        
-        # 建立一个本地临时 set 防止本次扫描中 Reporting/Issuer 重复处理
         current_run_seen_acc_nos = set()
 
         for entry in feed.entries:
             if entry.category != '4': continue
             
-            # 1. 唯一性去重：提取 AccNo
             acc_no = entry.id.split('=')[-1]
-            
-            # 如果是历史发过的，或者是本次循环中已经处理过的（解决公司/个人双条目问题），直接跳过
             if acc_no in processed_ids or acc_no in current_run_seen_acc_nos:
                 continue
 
             real_xml_url = get_real_xml_url(entry.link)
             if real_xml_url:
-                msg = parse_and_aggregate_buys(real_xml_url, entry.updated)
-                if msg:
+                # 💡 这里接收返回的元组
+                result = parse_and_aggregate_buys(real_xml_url, entry.updated)
+                
+                if result:
+                    msg, sig = result  # 拆分消息和指纹
+                    
+                    # 💡 核心去重逻辑：如果该指纹在本次运行中已出现，则跳过
+                    if sig in seen_trades_this_run:
+                        # 记录 ID 防止重复抓取 XML，但不加入推送队列
+                        current_run_seen_acc_nos.add(acc_no)
+                        new_ids.append(acc_no) 
+                        continue
+                    
+                    # 如果是新指纹，则加入队列并记录指纹
+                    seen_trades_this_run.add(sig)
                     message_queue.append(msg)
                     new_ids.append(acc_no)
                     current_run_seen_acc_nos.add(acc_no)
