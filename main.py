@@ -17,7 +17,8 @@ SEC_HEADERS = {
 
 FEED_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom"
 BUY_THRESHOLD = 1000000  # 100万美元门槛
-PRICE_FLOOR = 20        # 股价低于20美元过滤
+PRICE_FLOOR = 15        # 股价低于15美元过滤
+MKT_CAP_FLOOR = 500_000_000  # 5亿美元市值地板
 STATE_FILE = "processed_ids.txt"
 
 TG_TOKEN = os.getenv("TG_TOKEN")
@@ -143,13 +144,15 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         # --- 过滤逻辑 2: 股价地板 ---
         if curr_price is not None and curr_price < PRICE_FLOOR: return None 
         if curr_price is None: return None
+        if market_cap is None: return None
+        if market_cap < MKT_CAP_FLOOR: return None
 
         # --- 仓位变动计算 ---
         shares_before = final_owned - total_shares
         if shares_before > 0:
             pos_change_pct = (total_shares / shares_before) * 100
-            # --- 过滤逻辑 3: 增持比例必须 >= 20% ---
-            if pos_change_pct < 20 and total_value < 100000000: return None
+            # --- 过滤逻辑 3: 增持比例必须 >= 15% ---
+            if pos_change_pct < 15 and total_value < 100000000: return None
             pos_change_str = f"+{pos_change_pct:.2f}%"
         elif shares_before == 0 and total_value > 50000000:
             pos_change_str = "新建仓位"
