@@ -2,11 +2,12 @@ import feedparser
 import xml.etree.ElementTree as ET
 from curl_cffi import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import time
 import random
 import yfinance as yf
 import os
+import re
 
 # --- 配置区 ---
 SEC_HEADERS = {
@@ -55,6 +56,39 @@ def format_large_number(num):
     if num >= 1_000_000_000: return f"${num / 1_000_000_000:.2f}B"
     return f"${num / 1_000_000:.2f}M"
 
+def check_stock_titan_offering(symbol):
+    """
+    检查过去10天内Stock Titan RSS里出现的新闻标题是否包含 offering
+    若包含返回 True（代表需要拦截），否则返回 False
+    """
+    try:
+        rss_url = f"https://www.stocktitan.net/rss/news/{symbol}"
+        # 使用普通 requests 或 curl_cffi 获取 RSS 内容
+        resp = requests.get(rss_url, timeout=10)
+        if resp.status_code != 200:
+            return False
+        
+        feed = feedparser.parse(resp.content)
+        now = datetime.now(timezone.utc)
+        ten_days_ago = now - timedelta(days=10)
+
+        for entry in feed.entries:
+            # 检查是否有发布时间
+            pub_date = getattr(entry, 'published_parsed', None)
+            if pub_date:
+                pub_dt = datetime.fromtimestamp(time.mktime(pub_date), tz=timezone.utc)
+                # 如果新闻发布时间在过去10天内
+                if pub_dt >= ten_days_ago:
+                    title = entry.get('title', '')
+                    # 使用正则匹配 offering 单词（不区分大小写）
+                    if re.search(r'\boffering\b', title, re.IGNORECASE):
+                        print(f"🚫 拦截 [{symbol}]：发现10天内新闻标题包含 offering -> {title}")
+                        return True
+        return False
+    except Exception as e:
+        print(f"⚠️ 检查 Stock Titan RSS 失败 [{symbol}]: {e}")
+        return False
+
 def get_real_xml_url(index_url):
     try:
         time.sleep(random.uniform(0.2, 0.4))
@@ -74,7 +108,6 @@ def get_real_xml_url(index_url):
 
 def parse_and_aggregate_buys(xml_url, pub_time_raw):
     try:
-        # 礼貌性随机延迟，避免被 SEC 封锁
         time.sleep(random.uniform(0.1, 0.2))
         resp = requests.get(xml_url, headers=SEC_HEADERS, impersonate="chrome120", timeout=15)
         if resp.status_code != 200: return None
@@ -91,19 +124,14 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
 
         try:
             if buy_time != "N/A":
-                # 转换发布时间为 datetime (UTC)
                 pub_dt = datetime.fromisoformat(pub_time_raw.replace('Z', '+00:00'))
-                # 转换购买时间为 datetime
                 buy_dt = datetime.strptime(buy_time, "%Y-%m-%d").replace(tzinfo=pub_dt.tzinfo)
                 
-                # 计算差值
                 diff = pub_dt - buy_dt
                 if diff.days > 5:
-                    # print(f"⏭️ 信号太旧 (滞后 {diff.days} 天): {symbol}")
                     return None
         except Exception as e:
             print(f"⚠️ 时间解析失败: {e}")
-            # 如果解析失败，通常选择放行或拦截，这里建议放行
             pass
         
         # 身份解析
@@ -116,7 +144,6 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         total_shares, total_value, final_owned = 0, 0, 0
 
         for trans in root.findall(".//nonDerivativeTransaction"):
-            # 核心过滤：只统计 Code P (Open Market Purchase)
             t_code = trans.find(".//transactionCode")
             if t_code is not None and t_code.text in ['1', 'P']:
                 s_node = trans.find(".//transactionShares/value")
@@ -128,11 +155,10 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
                 
                 total_shares += shares
                 total_value += (shares * price)
-                # 记录交易后的最终持股数（以最后一笔交易为准）
                 if o_node is not None and o_node.text:
                     final_owned = float(o_node.text)
 
-        # --- 新增：计算平均买入价 ---
+        # --- 计算平均买入价 ---
         avg_buy_price = total_value / total_shares if total_shares > 0 else 0
 
         # --- 过滤逻辑 1: 买入金额门槛 ---
@@ -147,6 +173,10 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         if market_cap is None: return None
         if market_cap < MKT_CAP_FLOOR: return None
 
+        # --- 新增过滤逻辑：检查过去10天内Stock Titan新闻标题是否含 offering ---
+        if check_stock_titan_offering(symbol):
+            return None
+
         # --- 仓位变动计算 ---
         shares_before = final_owned - total_shares
         if shares_before > 0:
@@ -157,7 +187,6 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         elif shares_before == 0 and total_value > 50000000:
             pos_change_str = "新建仓位"
         else:
-            # 根据原逻辑，若为首次建仓或数据异常，返回 None
             return None
 
         # --- 市值影响计算 ---
@@ -167,7 +196,6 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             mkt_impact_str = f"{mkt_impact:.4f}%"
 
         # --- 链接生成 ---
-        # 构造可直接阅读的 HTML 版本 URL
         view_url = f"{xml_url.rsplit('/', 1)[0]}/xslF345X05/{xml_url.rsplit('/', 1)[1]}"
 
         # --- 时间格式化 ---
@@ -177,6 +205,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
             pub_time_fmt = pub_time_raw
 
         trade_signature = f"{symbol}_{buy_time}_{total_shares}_{total_value:.2f}"
+        
         # --- 最终输出文本组装 ---
         output = (
             f"🕒 发布时间: {pub_time_fmt}\n"
@@ -193,11 +222,9 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         )
         return output, trade_signature
     except Exception as e:
-        # 调试用：print(f"解析 XML 出错: {e}")
         return None
 
 def run():
-    # 读取历史 ID
     processed_ids = set()
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -224,20 +251,16 @@ def run():
 
             real_xml_url = get_real_xml_url(entry.link)
             if real_xml_url:
-                # 💡 这里接收返回的元组
                 result = parse_and_aggregate_buys(real_xml_url, entry.updated)
                 
                 if result:
-                    msg, sig = result  # 拆分消息和指纹
+                    msg, sig = result 
                     
-                    # 💡 核心去重逻辑：如果该指纹在本次运行中已出现，则跳过
                     if sig in seen_trades_this_run:
-                        # 记录 ID 防止重复抓取 XML，但不加入推送队列
                         current_run_seen_acc_nos.add(acc_no)
                         new_ids.append(acc_no) 
                         continue
                     
-                    # 如果是新指纹，则加入队列并记录指纹
                     seen_trades_this_run.add(sig)
                     message_queue.append(msg)
                     new_ids.append(acc_no)
@@ -246,16 +269,12 @@ def run():
         
         # --- 合并推送逻辑 ---
         if message_queue:
-            # 1. 组装标题
             final_text = "<b>🔔内部人士买入警报</b>\n\n"
-            # 2. 将横线作为“连接符”放在信息之间，而不是放在开头
             final_text += ("\n\n" + "-" * 20 + "\n\n").join(message_queue)
-            # 3. 加上结尾标签
             final_text += "\n\n#InsiderTrading #Form4"
             
             send_tg_message(final_text)
 
-        # 保存状态
         updated_ids = list(new_ids) + list(processed_ids)
         with open(STATE_FILE, "w") as f:
             f.write("\n".join(updated_ids[:1000]))
