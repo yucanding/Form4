@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
+from curl_cffi.requests.exceptions import Timeout, RequestException
 import time
 import random
 import yfinance as yf
@@ -119,7 +120,7 @@ def check_stock_titan_offering(symbol):
 def get_real_xml_url(index_url):
     try:
         time.sleep(random.uniform(0.2, 0.4))
-        resp = requests.get(index_url, headers=SEC_HEADERS, impersonate="chrome120", timeout=15)
+        resp = safe_get(index_url, timeout=20)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.content, 'html.parser')
             table = soup.find('table', {'class': 'tableFile', 'summary': 'Document Format Files'})
@@ -137,7 +138,7 @@ def get_real_xml_url(index_url):
 def parse_and_aggregate_buys(xml_url, pub_time_raw):
     try:
         time.sleep(random.uniform(0.1, 0.2))
-        resp = requests.get(xml_url, headers=SEC_HEADERS, impersonate="chrome120", timeout=15)
+        resp = safe_get(xml_url, timeout=20)
         if resp.status_code != 200: return None
         
         root = ET.fromstring(resp.content)
@@ -253,6 +254,23 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         print(f"⚠️ Form 4 解析失败 [{xml_url}]: {e}")
         return None
 
+def safe_get(url, headers=None, timeout=45, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                url,
+                headers=headers or SEC_HEADERS,
+                impersonate="chrome120",
+                timeout=timeout
+            )
+            resp.raise_for_status()
+            return resp
+        except (Timeout, RequestException) as e:
+            print(f"⚠️ 第 {attempt+1} 次请求失败: {e}")
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 + attempt * 2)  # 2s, 4s, 6s
+    return None
 
 def run():
     processed_ids = set()
@@ -265,13 +283,7 @@ def run():
     seen_trades_this_run = set()
 
     try:
-        resp = requests.get(
-            FEED_URL,
-            headers=SEC_HEADERS,
-            impersonate="chrome120",
-            timeout=30
-        )
-        resp.raise_for_status()
+        resp = safe_get(FEED_URL, timeout=45)
 
         feed = feedparser.parse(resp.content)
 
