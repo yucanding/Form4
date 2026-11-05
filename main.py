@@ -11,7 +11,7 @@ import re
 
 # --- 配置区 ---
 SEC_HEADERS = {
-    "User-Agent": "Institutional Alpha Analyst (your-email@example.com)",
+    "User-Agent": "Institutional Alpha Analyst (kafkahf@gmail.com)",
     "Accept": "text/html,application/xhtml+xml,application/xml",
     "Host": "www.sec.gov"
 }
@@ -26,19 +26,45 @@ TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_IDS = os.getenv("TG_CHAT_ID", "").split(",")
 
 def send_tg_message(text):
-    """ 推送到 Telegram 目标 """
-    if not TG_TOKEN or not TG_CHAT_IDS:
-        print(text)
-        return
-    for chat_id in TG_CHAT_IDS:
-        chat_id = chat_id.strip()
-        if not chat_id: continue
+    """推送到所有 Telegram 目标，任何目标发送失败均抛出异常"""
+    chat_ids = [
+        cid.strip()
+        for cid in TG_CHAT_IDS
+        if cid.strip()
+    ]
+
+    if not TG_TOKEN or not chat_ids:
+        raise RuntimeError("Telegram 配置缺失：TG_TOKEN 或 TG_CHAT_ID")
+
+    errors = []
+
+    for chat_id in chat_ids:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        }
+
         try:
-            requests.post(url, json=payload, timeout=10)
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+
+            result = resp.json()
+            if not result.get("ok"):
+                raise RuntimeError(f"Telegram API 返回错误: {result}")
+
+            print(f"✅ Telegram 推送成功: {chat_id}")
+
         except Exception as e:
-            print(f"发送到 {chat_id} 失败: {e}")
+            errors.append(f"{chat_id}: {e}")
+            print(f"❌ 发送到 {chat_id} 失败: {e}")
+
+    if errors:
+        raise RuntimeError(
+            "Telegram 推送失败:\n" + "\n".join(errors)
+        )
 
 def get_market_data(ticker):
     try:
@@ -48,7 +74,8 @@ def get_market_data(ticker):
         price = info.get('regularMarketPrice') or info.get('currentPrice')
         mkt_cap = info.get('marketCap')
         return price, mkt_cap
-    except:
+    except Exception as e:
+        print(f"⚠️ Yahoo Finance 查询失败 [{ticker}]: {e}")
         return None, None
 
 def format_large_number(num):
@@ -103,7 +130,8 @@ def get_real_xml_url(index_url):
                         file_name = cells[2].text.strip()
                         if file_name.lower().endswith('.xml') and 'xsd' not in file_name.lower():
                             return f"{index_url.rsplit('/', 1)[0]}/{file_name}"
-    except: pass
+    except Exception as e:
+        print(f"⚠️ SEC XML URL 获取失败 [{index_url}]: {e}")
     return None
 
 def parse_and_aggregate_buys(xml_url, pub_time_raw):
@@ -222,7 +250,9 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         )
         return output, trade_signature
     except Exception as e:
+        print(f"⚠️ Form 4 解析失败 [{xml_url}]: {e}")
         return None
+
 
 def run():
     processed_ids = set()
@@ -230,52 +260,72 @@ def run():
         with open(STATE_FILE, "r") as f:
             processed_ids = set(f.read().splitlines())
 
-    print(f"📡 正在开启深度分析...")
+    print("📡 正在开启深度分析...")
 
     seen_trades_this_run = set()
-    
+
     try:
-        resp = requests.get(FEED_URL, headers=SEC_HEADERS, impersonate="chrome120", timeout=30)
+        resp = requests.get(
+            FEED_URL,
+            headers=SEC_HEADERS,
+            impersonate="chrome120",
+            timeout=30
+        )
+        resp.raise_for_status()
+
         feed = feedparser.parse(resp.content)
-        
+
+        if feed.bozo:
+            raise RuntimeError(
+                f"SEC RSS XML 解析异常: {feed.bozo_exception}"
+            )
+
         message_queue = []
         new_ids = []
         current_run_seen_acc_nos = set()
 
         for entry in feed.entries:
-            if entry.category != '4': continue
-            
+            if entry.category != '4':
+                continue
+
             acc_no = entry.id.split('=')[-1]
+
             if acc_no in processed_ids or acc_no in current_run_seen_acc_nos:
                 continue
 
             real_xml_url = get_real_xml_url(entry.link)
+
             if real_xml_url:
-                result = parse_and_aggregate_buys(real_xml_url, entry.updated)
-                
+                result = parse_and_aggregate_buys(
+                    real_xml_url, entry.updated
+                )
+
                 if result:
-                    msg, sig = result 
-                    
+                    msg, sig = result
+
                     if sig in seen_trades_this_run:
                         current_run_seen_acc_nos.add(acc_no)
-                        new_ids.append(acc_no) 
+                        new_ids.append(acc_no)
                         continue
-                    
+
                     seen_trades_this_run.add(sig)
                     message_queue.append(msg)
                     new_ids.append(acc_no)
                     current_run_seen_acc_nos.add(acc_no)
+
                     print(f"✅ 捕获有效信号: {acc_no}")
-        
-        # --- 合并推送逻辑 ---
+
         if message_queue:
             final_text = "<b>🔔内部人士买入警报</b>\n\n"
-            final_text += ("\n\n" + "-" * 20 + "\n\n").join(message_queue)
+            final_text += (
+                "\n\n" + "-" * 20 + "\n\n"
+            ).join(message_queue)
             final_text += "\n\n#InsiderTrading #Form4"
-            
+
             send_tg_message(final_text)
 
         updated_ids = list(new_ids) + list(processed_ids)
+
         with open(STATE_FILE, "w") as f:
             f.write("\n".join(updated_ids[:1000]))
 
@@ -283,6 +333,7 @@ def run():
 
     except Exception as e:
         print(f"\n🚨 运行异常: {e}")
+        raise
 
 if __name__ == "__main__":
     run()
