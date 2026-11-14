@@ -45,31 +45,3 @@ jobs:
             git commit -m "chore: update processed_ids [skip ci]"
             git push
           fi
-
-      - name: Notify Telegram on Failure
-        if: failure()
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          IFS=',' read -ra CHAT_IDS <<< "$TG_CHAT_ID"
-
-          MESSAGE="🚨 SEC Form 4 Monitor 运行失败！
-
-          Workflow: ${{ github.workflow }}
-          Run: #${RUN_NUMBER}
-
-          错误日志：
-          ${RUN_URL}"
-
-          for CID in "${CHAT_IDS[@]}"; do
-            CID=$(echo "$CID" | xargs)
-            [ -z "$CID" ] && continue
-
-            curl --fail-with-body --silent --show-error \
-              -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=${CID}" \
-              --data-urlencode "text=${MESSAGE}"
-          done
