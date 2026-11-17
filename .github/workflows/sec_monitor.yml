@@ -32,6 +32,7 @@ jobs:
         run: python main.py
 
       - name: Save State
+        if: always()
         run: |
           git config user.name "sec-bot"
           git config user.email "bot@sec.gov"
@@ -39,9 +40,13 @@ jobs:
           touch processed_ids.txt
           git add processed_ids.txt
 
+          if [ -f pending_telegram.json ]; then
+            git add pending_telegram.json
+          fi
+
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update processed_ids [skip ci]"
+            git commit -m "chore: update monitor state [skip ci]"
             git push
           fi
