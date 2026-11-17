@@ -9,6 +9,7 @@ import random
 import yfinance as yf
 import os
 import re
+import json
 
 # --- 配置区 ---
 SEC_HEADERS = {
@@ -22,50 +23,92 @@ BUY_THRESHOLD = 1000000  # 100万美元门槛
 PRICE_FLOOR = 10        # 股价低于10美元过滤
 MKT_CAP_FLOOR = 1_000_000_000  # 10亿美元市值地板
 STATE_FILE = "processed_ids.txt"
+PENDING_FILE = "pending_telegram.json"  # Telegram 未发送消息持久化文件
 
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_IDS = os.getenv("TG_CHAT_ID", "").split(",")
 
+
+def load_pending_messages():
+    if not os.path.exists(PENDING_FILE):
+        return []
+    with open(PENDING_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_pending_messages(queue):
+    temp_file = PENDING_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(queue, f, ensure_ascii=False, indent=2)
+    os.replace(temp_file, PENDING_FILE)
+
+def flush_pending_messages():
+    queue = load_pending_messages()
+    if not queue:
+        return
+
+    current_ids = [cid.strip() for cid in TG_CHAT_IDS if cid.strip()]
+
+    if not TG_TOKEN or not current_ids:
+        print("⚠️ Telegram 配置缺失，消息保留待下次重试")
+        return
+
+    for item in queue:
+        # 兼容旧队列，并避免将已全部发送的消息重新发送
+        if "chat_ids" not in item:
+            item["chat_ids"] = current_ids.copy()
+
+        targets = item["chat_ids"][:]
+        if not targets:
+            continue
+
+        remaining = []
+
+        for i, chat_id in enumerate(targets):
+            try:
+                url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": item["text"],
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": False
+                }
+
+                resp = requests.post(url, json=payload, timeout=15)
+                resp.raise_for_status()
+                result = resp.json()
+
+                if not result.get("ok"):
+                    raise RuntimeError(f"Telegram API 返回错误: {result}")
+
+                print(f"✅ Telegram 推送成功: {chat_id}")
+
+            except Exception as e:
+                print(f"❌ Telegram 推送失败 [{chat_id}]: {e}")
+                remaining.append(chat_id)
+
+            item["chat_ids"] = remaining + targets[i+1:]
+            save_pending_messages(queue)
+
+    queue = [item for item in queue if item.get("chat_ids") is not None and len(item["chat_ids"]) > 0]
+    save_pending_messages(queue)
+
+    if queue:
+        print(f"⚠️ 仍有 {len(queue)} 条消息未全部发送，已保存待下次重试")
+    else:
+        print("✅ 所有 Telegram 待发送消息已处理完成")
+
+
+
 def send_tg_message(text):
-    """推送到所有 Telegram 目标，任何目标发送失败均抛出异常"""
-    chat_ids = [
-        cid.strip()
-        for cid in TG_CHAT_IDS
-        if cid.strip()
-    ]
+    queue = load_pending_messages()
+    chat_ids = [cid.strip() for cid in TG_CHAT_IDS if cid.strip()]
 
-    if not TG_TOKEN or not chat_ids:
-        raise RuntimeError("Telegram 配置缺失：TG_TOKEN 或 TG_CHAT_ID")
+    queue.append({"text": text, "chat_ids": chat_ids})
+    save_pending_messages(queue)
 
-    errors = []
+    flush_pending_messages()
 
-    for chat_id in chat_ids:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False
-        }
-
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            resp.raise_for_status()
-
-            result = resp.json()
-            if not result.get("ok"):
-                raise RuntimeError(f"Telegram API 返回错误: {result}")
-
-            print(f"✅ Telegram 推送成功: {chat_id}")
-
-        except Exception as e:
-            errors.append(f"{chat_id}: {e}")
-            print(f"❌ 发送到 {chat_id} 失败: {e}")
-
-    if errors:
-        raise RuntimeError(
-            "Telegram 推送失败:\n" + "\n".join(errors)
-        )
 
 def get_market_data(ticker):
     try:
@@ -254,7 +297,7 @@ def parse_and_aggregate_buys(xml_url, pub_time_raw):
         print(f"⚠️ Form 4 解析失败 [{xml_url}]: {e}")
         return None
 
-def safe_get(url, headers=None, timeout=45, max_retries=3):
+def safe_get(url, headers=None, timeout=45, max_retries=5):
     for attempt in range(max_retries):
         try:
             resp = requests.get(
@@ -266,11 +309,17 @@ def safe_get(url, headers=None, timeout=45, max_retries=3):
             resp.raise_for_status()
             return resp
         except (Timeout, RequestException) as e:
-            print(f"⚠️ 第 {attempt+1} 次请求失败: {e}")
             if attempt == max_retries - 1:
+                print(f"❌ 请求最终失败 [{url}]: {e}")
                 raise
-            time.sleep(2 + attempt * 2)  # 2s, 4s, 6s
+
+            wait = min(3 * (2 ** attempt), 48) + random.uniform(0.5, 2)
+            print(f"⚠️ 第 {attempt+1}/{max_retries} 次请求失败: {e}")
+            print(f"⏳ {wait:.1f} 秒后重试...")
+            time.sleep(wait)
+
     return None
+
 
 def run():
     processed_ids = set()
@@ -283,7 +332,13 @@ def run():
     seen_trades_this_run = set()
 
     try:
-        resp = safe_get(FEED_URL, timeout=45)
+        try:
+            resp = safe_get(FEED_URL, timeout=45)
+        except RequestException as e:
+            if isinstance(e, Timeout) or "timed out" in str(e).lower():
+                print(f"⏭️ SEC RSS 请求最终超时，本次扫描跳过，不标记为运行失败: {e}")
+                return
+            raise
 
         feed = feedparser.parse(resp.content)
 
@@ -329,12 +384,11 @@ def run():
 
         if message_queue:
             final_text = "<b>🔔内部人士买入警报</b>\n\n"
-            final_text += (
-                "\n\n" + "-" * 20 + "\n\n"
-            ).join(message_queue)
+            final_text += ("\n\n" + "-" * 20 + "\n\n").join(message_queue)
             final_text += "\n\n#InsiderTrading #Form4"
-
             send_tg_message(final_text)
+        else:
+            flush_pending_messages()
 
         updated_ids = list(new_ids) + list(processed_ids)
 
